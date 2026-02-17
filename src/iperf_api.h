@@ -98,6 +98,7 @@ typedef atomic_uint_fast64_t atomic_iperf_size_t;
 #define OPT_BIND_DEV 24
 #define OPT_IDLE_TIMEOUT 25
 #define OPT_DONT_FRAGMENT 26
+#define OPT_DSCP_CHANGE 35
 #define OPT_RCV_TIMEOUT 27
 #define OPT_JSON_STREAM 28
 #define OPT_SND_TIMEOUT 29
@@ -351,6 +352,7 @@ void warning(const char *);
 int iperf_exchange_results(struct iperf_test *);
 int iperf_init_test(struct iperf_test *);
 int iperf_create_send_timers(struct iperf_test *);
+int iperf_create_dscp_timers(struct iperf_test *);
 int iperf_parse_arguments(struct iperf_test *, int, char **);
 int iperf_open_logfile(struct iperf_test *);
 void iperf_close_logfile(struct iperf_test *);
@@ -526,3 +528,4 @@ enum {
 
 
 #endif /* !__IPERF_API_H */
+

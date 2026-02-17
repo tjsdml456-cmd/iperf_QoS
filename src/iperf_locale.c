@@ -207,6 +207,11 @@ const char usage_longstr[] = "Usage: iperf3 [-s|-c host] [options]\n"
                            "  --dscp N or --dscp val    set the IP dscp value, either 0-63 or symbolic.\n"
                            "                            Numeric values can be specified in decimal,\n"
                            "                            octal and hex (see --tos above).\n"
+                           "  --dscp-change val         dynamically change DSCP during test.\n"
+                           "                            Format: \"dscp1,time1,dscp2,time2,dscp3\"\n"
+                           "                            Example: \"0,20,32,50,14\" means:\n"
+                           "                            start with DSCP=0, change to DSCP=32 at 20s,\n"
+                           "                            change to DSCP=14 at 50s (TCP only).\n"
 #if defined(HAVE_FLOWLABEL)
                            "  -L, --flowlabel N         set the IPv6 flow label (only supported on Linux)\n"
 #endif /* HAVE_FLOWLABEL */
@@ -574,3 +579,4 @@ const char warn_invalid_report[] =
 #ifdef __cplusplus
 } /* end extern "C" */
 #endif
+

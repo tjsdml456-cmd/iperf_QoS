@@ -1135,6 +1135,7 @@ iperf_parse_arguments(struct iperf_test *test, int argc, char **argv)
         {"version6", no_argument, NULL, '6'},
         {"tos", required_argument, NULL, 'S'},
         {"dscp", required_argument, NULL, OPT_DSCP},
+	{"dscp-change", required_argument, NULL, OPT_DSCP_CHANGE},
 	{"extra-data", required_argument, NULL, OPT_EXTRA_DATA},
 #if defined(HAVE_FLOWLABEL)
         {"flowlabel", required_argument, NULL, 'L'},
@@ -1513,6 +1514,67 @@ iperf_parse_arguments(struct iperf_test *test, int argc, char **argv)
 		}
 		client_flag = 1;
                 break;
+	    case OPT_DSCP_CHANGE:
+		{
+		    /* Parse format: "dscp1,time1,dscp2,time2,dscp3" */
+		    /* Allows for 2 changes (3 total DSCP values) */
+		    char *str = strdup(optarg);
+		    char *token, *saveptr;
+		    int count = 0;
+		    int dscp_val;
+		    double time_val;
+		    
+		    if (!str) {
+			i_errno = IEBADTOS;
+			return -1;
+		    }
+		    
+		    token = strtok_r(str, ",", &saveptr);
+		    while (token != NULL && count < 5) {
+			if (count % 2 == 0) {
+			    /* DSCP value */
+			    if (count / 2 >= 4) {
+				free(str);
+				i_errno = IEBADTOS;
+				return -1;
+			    }
+			    dscp_val = parse_qos(token);
+			    if (dscp_val < 0) {
+				free(str);
+				i_errno = IEBADTOS;
+				return -1;
+			    }
+			    test->settings->dscp_values[count / 2] = dscp_val;
+			} else {
+			    /* Time value */
+			    time_val = strtod(token, &endptr);
+			    if (endptr == token || time_val < 0) {
+				free(str);
+				i_errno = IEBADTOS;
+				return -1;
+			    }
+			    test->settings->dscp_times[(count - 1) / 2] = time_val;
+			}
+			count++;
+			token = strtok_r(NULL, ",", &saveptr);
+		    }
+		    
+		    /* Calculate number of DSCP values */
+		    test->settings->dscp_count = (count + 1) / 2;
+		    if (test->settings->dscp_count < 2 || test->settings->dscp_count > 4) {
+			free(str);
+			i_errno = IEBADTOS;
+			return -1;
+		    }
+		    
+		    /* Set initial TOS to first DSCP value */
+		    test->settings->tos = test->settings->dscp_values[0];
+		    test->settings->current_dscp_index = 0;
+		    
+		    free(str);
+		    client_flag = 1;
+		}
+		break;
 	    case OPT_EXTRA_DATA:
 		test->extra_data = strdup(optarg);
 		client_flag = 1;
@@ -2256,6 +2318,148 @@ iperf_init_test(struct iperf_test *test)
 }
 
 
+/* Structure to pass stream and DSCP index to timer callback */
+struct dscp_timer_data {
+    struct iperf_stream *sp;
+    int dscp_index;
+};
+
+/* Timer callback function for DSCP changes */
+static void
+dscp_change_timer_proc(TimerClientData client_data, struct iperf_time *nowP)
+{
+    struct dscp_timer_data *data = (struct dscp_timer_data *)client_data.p;
+    struct iperf_stream *sp = data->sp;
+    struct iperf_test *test = sp->test;
+    struct iperf_settings *settings = sp->settings;
+    int dscp_index = data->dscp_index;
+    int i;
+    
+    if (test->done || test->state != TEST_RUNNING) {
+	/* Clear timer data pointer in stream */
+	for (i = 0; i < 3; i++) {
+	    if (sp->dscp_timer_data[i] == data) {
+		sp->dscp_timer_data[i] = NULL;
+		break;
+	    }
+	}
+	free(data);
+	return;
+    }
+    
+    if (dscp_index < settings->dscp_count) {
+	int new_tos = settings->dscp_values[dscp_index];
+	int domain = getsockdomain(sp->socket);
+	struct iperf_time now, diff;
+	double elapsed;
+	
+	/* Before changing DSCP, try to minimize buffered data for ALL streams */
+	/* Enable TCP_NODELAY and reduce socket buffer size to minimize buffering delay */
+	int opt = 1;
+	int min_sndbuf = 1024;  /* Minimum socket buffer size (1KB) - smaller for faster flush */
+	struct iperf_stream *all_sp;
+	
+	/* Apply socket buffer reduction to ALL streams (UE1, UE2, UE3) */
+	SLIST_FOREACH(all_sp, &test->streams, streams) {
+	    int saved_nodelay = 0;
+	    int saved_sndbuf = 0;
+	    socklen_t optlen = sizeof(saved_nodelay);
+	    
+	    /* Get and enable TCP_NODELAY to minimize buffering */
+	    if (getsockopt(all_sp->socket, IPPROTO_TCP, TCP_NODELAY, &saved_nodelay, &optlen) == 0) {
+		if (!saved_nodelay) {
+		    setsockopt(all_sp->socket, IPPROTO_TCP, TCP_NODELAY, &opt, sizeof(opt));
+		}
+	    }
+	    
+	    /* Reduce socket send buffer size to minimize buffered data */
+	    optlen = sizeof(saved_sndbuf);
+	    if (getsockopt(all_sp->socket, SOL_SOCKET, SO_SNDBUF, &saved_sndbuf, &optlen) == 0) {
+		if (saved_sndbuf > min_sndbuf) {
+		    /* Temporarily reduce send buffer to minimize buffering */
+		    setsockopt(all_sp->socket, SOL_SOCKET, SO_SNDBUF, &min_sndbuf, sizeof(min_sndbuf));
+		    /* Store original buffer size in stream data for later restoration */
+		    if (all_sp->data == NULL) {
+			/* Allocate memory to store original buffer size */
+			int *buf_data = (int *)malloc(sizeof(int));
+			if (buf_data) {
+			    *buf_data = saved_sndbuf;
+			    all_sp->data = buf_data;
+			}
+		    } else {
+			*(int *)all_sp->data = saved_sndbuf;
+		    }
+		    if (test->debug) {
+			printf("Reduced SO_SNDBUF from %d to %d for stream %d\n", 
+			       saved_sndbuf, min_sndbuf, all_sp->socket);
+		    }
+		}
+	    }
+	}
+	
+	/* Now change the DSCP value for this specific stream */
+	if (change_socket_dscp(sp->socket, new_tos, domain) == 0) {
+	    settings->current_dscp_index = dscp_index;
+	    settings->tos = new_tos;
+	    
+	    /* Force immediate transmission by sending a zero-length packet */
+	    /* This helps ensure new DSCP is applied to subsequent packets */
+	    char dummy = 0;
+	    send(sp->socket, &dummy, 0, MSG_DONTWAIT | MSG_NOSIGNAL);
+	    
+	    /* Restore original socket buffer size for ALL streams after a delay */
+	    /* Wait longer to allow buffered data with old DSCP to be sent first */
+	    /* Increased delay to reduce gap between iperf3 change and scheduler detection */
+	    /* Use longer delay to ensure small buffer (1KB) is fully flushed before restoring */
+	    usleep(500000);  /* 500ms delay - ensures buffered data with old DSCP is fully transmitted */
+	    SLIST_FOREACH(all_sp, &test->streams, streams) {
+		if (all_sp->data != NULL) {
+		    int saved_buf = *(int *)all_sp->data;
+		    if (saved_buf > min_sndbuf) {
+			setsockopt(all_sp->socket, SOL_SOCKET, SO_SNDBUF, &saved_buf, sizeof(saved_buf));
+			if (test->debug) {
+			    printf("Restored SO_SNDBUF to %d for stream %d\n", 
+				   saved_buf, all_sp->socket);
+			}
+			free(all_sp->data);
+			all_sp->data = NULL;
+		    }
+		}
+	    }
+	    
+	    if (test->debug) {
+		iperf_time_now(&now);
+		iperf_time_diff(&now, &sp->result->start_time_fixed, &diff);
+		elapsed = iperf_time_in_secs(&diff);
+		printf("Changed DSCP to %d (0x%02x) at %.6f seconds\n",
+		       new_tos, new_tos, elapsed);
+	    }
+	} else if (test->debug) {
+	    printf("Warning: Failed to change DSCP to %d\n", new_tos);
+	    /* Restore settings for all streams if DSCP change failed */
+	    SLIST_FOREACH(all_sp, &test->streams, streams) {
+		if (all_sp->data != NULL) {
+		    int saved_buf = *(int *)all_sp->data;
+		    if (saved_buf > min_sndbuf) {
+			setsockopt(all_sp->socket, SOL_SOCKET, SO_SNDBUF, &saved_buf, sizeof(saved_buf));
+			free(all_sp->data);
+			all_sp->data = NULL;
+		    }
+		}
+	    }
+	}
+    }
+    
+    /* Clear timer data pointer in stream and free */
+    for (i = 0; i < 3; i++) {
+	if (sp->dscp_timer_data[i] == data) {
+	    sp->dscp_timer_data[i] = NULL;
+	    break;
+	}
+    }
+    free(data);
+}
+
 int
 iperf_create_send_timers(struct iperf_test * test)
 {
@@ -2265,6 +2469,79 @@ iperf_create_send_timers(struct iperf_test * test)
     SLIST_FOREACH(sp, &test->streams, streams) {
         sp->green_light = 1;
     }
+    return 0;
+}
+
+/* Create DSCP change timers for all streams */
+int
+iperf_create_dscp_timers(struct iperf_test * test)
+{
+    struct iperf_stream *sp;
+    struct iperf_settings *settings;
+    struct iperf_time now;
+    TimerClientData cd;
+    struct dscp_timer_data *timer_data;
+    int i;
+    
+    if (iperf_time_now(&now) < 0) {
+	i_errno = IEINITTEST;
+	return -1;
+    }
+    
+    SLIST_FOREACH(sp, &test->streams, streams) {
+	settings = sp->settings;
+	
+	/* Initialize DSCP timers array */
+	for (i = 0; i < 3; i++) {
+	    sp->dscp_timers[i] = NULL;
+	    sp->dscp_timer_data[i] = NULL;
+	}
+	
+	/* Create timers for each DSCP change */
+	if (settings->dscp_count > 1) {
+	    struct iperf_time target_time, diff;
+	    
+	    for (i = 0; i < settings->dscp_count - 1; i++) {
+		/* Allocate memory for timer data */
+		timer_data = (struct dscp_timer_data *)malloc(sizeof(struct dscp_timer_data));
+		if (timer_data == NULL) {
+		    i_errno = IEINITTEST;
+		    return -1;
+		}
+		timer_data->sp = sp;
+		timer_data->dscp_index = i + 1; /* Next DSCP value index */
+		
+		cd.p = timer_data;
+		
+		/* Calculate target time: start_time_fixed + dscp_times[i] */
+		target_time = sp->result->start_time_fixed;
+		iperf_time_add_usecs(&target_time, (int64_t)(settings->dscp_times[i] * SEC_TO_US));
+		
+		/* Calculate delay from now to target time */
+		iperf_time_diff(&target_time, &now, &diff);
+		int64_t delay_usecs = iperf_time_in_usecs(&diff);
+		
+		/* If target time is in the past, skip this timer */
+		if (delay_usecs < 0) {
+		    free(timer_data);
+		    continue;
+		}
+		
+		/* Store timer data pointer for cleanup */
+		sp->dscp_timer_data[i] = timer_data;
+		
+		/* Create one-shot timer */
+		sp->dscp_timers[i] = tmr_create(&now, dscp_change_timer_proc, cd, delay_usecs, 0);
+		if (sp->dscp_timers[i] == NULL) {
+		    free(timer_data);
+		    sp->dscp_timer_data[i] = NULL;
+		    i_errno = IEINITTEST;
+		    return -1;
+		}
+	    }
+	}
+    }
+    
     return 0;
 }
 
@@ -3553,6 +3830,11 @@ iperf_reset_test(struct iperf_test *test)
     test->settings->mss = 0;
     test->settings->tos = 0;
     test->settings->dont_fragment = 0;
+    /* Initialize dynamic DSCP fields */
+    test->settings->dscp_count = 0;
+    test->settings->current_dscp_index = 0;
+    memset(test->settings->dscp_values, 0, sizeof(test->settings->dscp_values));
+    memset(test->settings->dscp_times, 0, sizeof(test->settings->dscp_times));
     test->zerocopy = 0;
     test->settings->skip_rx_copy = 0;
 
@@ -4694,6 +4976,7 @@ void
 iperf_free_stream(struct iperf_stream *sp)
 {
     struct iperf_interval_results *irp, *nirp;
+    int i;
 
     /* XXX: need to free interval list too! */
     munmap(sp->buffer, sp->test->settings->blksize);
@@ -4707,6 +4990,22 @@ iperf_free_stream(struct iperf_stream *sp)
     free(sp->result);
     if (sp->send_timer != NULL)
 	tmr_cancel(sp->send_timer);
+    /* Cancel and free DSCP timers */
+    for (i = 0; i < 3; i++) {
+	if (sp->dscp_timers[i] != NULL) {
+	    tmr_cancel(sp->dscp_timers[i]);
+	    sp->dscp_timers[i] = NULL;
+	}
+	if (sp->dscp_timer_data[i] != NULL) {
+	    free(sp->dscp_timer_data[i]);
+	    sp->dscp_timer_data[i] = NULL;
+	}
+    }
+    /* Free socket buffer size data if allocated */
+    if (sp->data != NULL) {
+	free(sp->data);
+	sp->data = NULL;
+    }
     free(sp);
 }
 
@@ -5572,3 +5871,4 @@ iperf_set_control_keepalive(struct iperf_test *test)
     return 0;
 }
 #endif //HAVE_TCP_KEEPALIVE
+

@@ -59,5 +59,12 @@ int iperf_tcp_listen(struct iperf_test *);
 
 int iperf_tcp_connect(struct iperf_test *);
 
+/**
+ * change_socket_dscp -- changes the DSCP value on a socket
+ * returns 0 on success, -1 on failure
+ */
+int change_socket_dscp(int s, int tos_value, int domain);
+
 
 #endif
+

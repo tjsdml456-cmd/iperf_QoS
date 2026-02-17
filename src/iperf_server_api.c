@@ -887,11 +887,16 @@ iperf_run_server(struct iperf_test *test)
 			cleanup_server(test);
                         return -1;
 		    }
-		    if (test->mode != RECEIVER)
+		    if (test->mode != RECEIVER) {
 			if (iperf_create_send_timers(test) < 0) {
 			    cleanup_server(test);
 			    return -1;
 			}
+			if (iperf_create_dscp_timers(test) < 0) {
+			    cleanup_server(test);
+			    return -1;
+			}
+		    }
 		    if (iperf_set_send_state(test, TEST_RUNNING) != 0) {
 			cleanup_server(test);
                         return -1;
@@ -953,3 +958,4 @@ iperf_run_server(struct iperf_test *test)
 
     return 0;
 }
+

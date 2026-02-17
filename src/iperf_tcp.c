@@ -44,10 +44,33 @@
 #include "iperf_util.h"
 #include "net.h"
 #include "cjson.h"
+#include "iperf_time.h"
 
 #if defined(HAVE_FLOWLABEL)
 #include "flowlabel.h"
 #endif /* HAVE_FLOWLABEL */
+
+/* Helper function to change DSCP on a socket dynamically */
+int
+change_socket_dscp(int s, int tos_value, int domain)
+{
+    int opt = tos_value;
+    
+    if (domain == AF_INET6) {
+#ifdef IPV6_TCLASS
+	if (setsockopt(s, IPPROTO_IPV6, IPV6_TCLASS, &opt, sizeof(opt)) < 0) {
+	    return -1;
+	}
+#else
+	return -1;
+#endif
+    } else {
+	if (setsockopt(s, IPPROTO_IP, IP_TOS, &opt, sizeof(opt)) < 0) {
+	    return -1;
+	}
+    }
+    return 0;
+}
 
 /* iperf_tcp_recv
  *
@@ -611,3 +634,4 @@ iperf_tcp_connect(struct iperf_test *test)
 
     return s;
 }
+
