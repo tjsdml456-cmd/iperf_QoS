@@ -1136,6 +1136,7 @@ iperf_parse_arguments(struct iperf_test *test, int argc, char **argv)
         {"tos", required_argument, NULL, 'S'},
         {"dscp", required_argument, NULL, OPT_DSCP},
 	{"dscp-change", required_argument, NULL, OPT_DSCP_CHANGE},
+	{"rate-change", required_argument, NULL, OPT_RATE_CHANGE},
 	{"extra-data", required_argument, NULL, OPT_EXTRA_DATA},
 #if defined(HAVE_FLOWLABEL)
         {"flowlabel", required_argument, NULL, 'L'},
@@ -1516,8 +1517,8 @@ iperf_parse_arguments(struct iperf_test *test, int argc, char **argv)
                 break;
 	    case OPT_DSCP_CHANGE:
 		{
-		    /* Parse format: "dscp1,time1,dscp2,time2,dscp3" */
-		    /* Allows for 2 changes (3 total DSCP values) */
+		    /* Parse format: "dscp1,time1,dscp2,time2,dscp3" (2-4 DSCP values, 1-3 change times) */
+		    /* dscp_count is stored in test->settings (shared by all streams); each stream gets (dscp_count-1) timers */
 		    char *str = strdup(optarg);
 		    char *token, *saveptr;
 		    int count = 0;
@@ -1572,6 +1573,59 @@ iperf_parse_arguments(struct iperf_test *test, int argc, char **argv)
 		    test->settings->current_dscp_index = 0;
 		    
 		    free(str);
+		    client_flag = 1;
+		}
+		break;
+	    case OPT_RATE_CHANGE:
+		{
+		    /* Parse format: "rate1,time1,rate2,time2,rate3" (e.g. "20M,20,1M,40,15M") */
+		    /* Same structure as --dscp-change: 2-4 rate values, 1-3 change times */
+		    char *rstr = strdup(optarg);
+		    char *rtok, *rsaveptr;
+		    int rcount = 0;
+		    double rtime_val;
+		    double rval;
+
+		    if (!rstr) {
+			i_errno = IEBADTOS;
+			return -1;
+		    }
+		    rtok = strtok_r(rstr, ",", &rsaveptr);
+		    while (rtok != NULL && rcount < 7) {
+			if (rcount % 2 == 0) {
+			    if (rcount / 2 >= 4) {
+				free(rstr);
+				i_errno = IEBADTOS;
+				return -1;
+			    }
+			    rval = unit_atof_rate(rtok);
+			    if (rval <= 0) {
+				free(rstr);
+				i_errno = IEUNITVAL;
+				return -1;
+			    }
+			    test->settings->rate_values[rcount / 2] = (iperf_size_t)rval;
+			} else {
+			    rtime_val = strtod(rtok, &endptr);
+			    if (endptr == rtok || rtime_val < 0) {
+				free(rstr);
+				i_errno = IEBADTOS;
+				return -1;
+			    }
+			    test->settings->rate_times[(rcount - 1) / 2] = rtime_val;
+			}
+			rcount++;
+			rtok = strtok_r(NULL, ",", &rsaveptr);
+		    }
+		    test->settings->rate_count = (rcount + 1) / 2;
+		    if (test->settings->rate_count < 2 || test->settings->rate_count > 4) {
+			free(rstr);
+			i_errno = IEBADTOS;
+			return -1;
+		    }
+		    test->settings->rate = test->settings->rate_values[0];
+		    test->settings->current_rate_index = 0;
+		    free(rstr);
 		    client_flag = 1;
 		}
 		break;
@@ -2460,6 +2514,59 @@ dscp_change_timer_proc(TimerClientData client_data, struct iperf_time *nowP)
     free(data);
 }
 
+/* Structure to pass stream and rate index to timer callback */
+struct rate_timer_data {
+    struct iperf_stream *sp;
+    int rate_index;
+};
+
+/* Timer callback for rate changes (UDP/TCP application pacing) */
+static void
+rate_change_timer_proc(TimerClientData client_data, struct iperf_time *nowP)
+{
+    struct rate_timer_data *data = (struct rate_timer_data *)client_data.p;
+    struct iperf_stream *sp = data->sp;
+    struct iperf_test *test = sp->test;
+    struct iperf_settings *settings = sp->settings;
+    int rate_index = data->rate_index;
+    int i;
+
+    if (test->done || test->state != TEST_RUNNING) {
+	for (i = 0; i < 3; i++) {
+	    if (sp->rate_timer_data[i] == data) {
+		sp->rate_timer_data[i] = NULL;
+		break;
+	    }
+	}
+	free(data);
+	return;
+    }
+
+    if (rate_index < settings->rate_count) {
+	iperf_size_t new_rate = settings->rate_values[rate_index];
+	struct iperf_time now, diff;
+	double elapsed;
+
+	settings->rate = new_rate;
+	settings->current_rate_index = rate_index;
+
+	if (test->debug) {
+	    iperf_time_now(&now);
+	    iperf_time_diff(&now, &sp->result->start_time_fixed, &diff);
+	    elapsed = iperf_time_in_secs(&diff);
+	    printf("Changed rate to %" PRIu64 " bps at %.6f seconds\n", (uint64_t)new_rate, elapsed);
+	}
+    }
+
+    for (i = 0; i < 3; i++) {
+	if (sp->rate_timer_data[i] == data) {
+	    sp->rate_timer_data[i] = NULL;
+	    break;
+	}
+    }
+    free(data);
+}
+
 int
 iperf_create_send_timers(struct iperf_test * test)
 {
@@ -2542,6 +2649,68 @@ iperf_create_dscp_timers(struct iperf_test * test)
 	}
     }
     
+    return 0;
+}
+
+/* Create rate change timers for all streams (same count per stream as DSCP) */
+int
+iperf_create_rate_timers(struct iperf_test * test)
+{
+    struct iperf_stream *sp;
+    struct iperf_settings *settings;
+    struct iperf_time now;
+    TimerClientData cd;
+    struct rate_timer_data *timer_data;
+    int i;
+
+    if (test->settings->rate_count < 2)
+	return 0;
+
+    if (iperf_time_now(&now) < 0) {
+	i_errno = IEINITTEST;
+	return -1;
+    }
+
+    SLIST_FOREACH(sp, &test->streams, streams) {
+	settings = sp->settings;
+
+	for (i = 0; i < 3; i++) {
+	    sp->rate_timers[i] = NULL;
+	    sp->rate_timer_data[i] = NULL;
+	}
+
+	if (settings->rate_count > 1) {
+	    struct iperf_time target_time, diff;
+
+	    for (i = 0; i < settings->rate_count - 1; i++) {
+		timer_data = (struct rate_timer_data *)malloc(sizeof(struct rate_timer_data));
+		if (timer_data == NULL) {
+		    i_errno = IEINITTEST;
+		    return -1;
+		}
+		timer_data->sp = sp;
+		timer_data->rate_index = i + 1;
+		cd.p = timer_data;
+
+		target_time = sp->result->start_time_fixed;
+		iperf_time_add_usecs(&target_time, (int64_t)(settings->rate_times[i] * SEC_TO_US));
+		iperf_time_diff(&target_time, &now, &diff);
+		int64_t delay_usecs = iperf_time_in_usecs(&diff);
+		if (delay_usecs < 0) {
+		    free(timer_data);
+		    continue;
+		}
+		sp->rate_timer_data[i] = timer_data;
+		sp->rate_timers[i] = tmr_create(&now, rate_change_timer_proc, cd, delay_usecs, 0);
+		if (sp->rate_timers[i] == NULL) {
+		    free(timer_data);
+		    sp->rate_timer_data[i] = NULL;
+		    i_errno = IEINITTEST;
+		    return -1;
+		}
+	    }
+	}
+    }
     return 0;
 }
 
@@ -3835,6 +4004,11 @@ iperf_reset_test(struct iperf_test *test)
     test->settings->current_dscp_index = 0;
     memset(test->settings->dscp_values, 0, sizeof(test->settings->dscp_values));
     memset(test->settings->dscp_times, 0, sizeof(test->settings->dscp_times));
+    /* Initialize dynamic rate change fields */
+    test->settings->rate_count = 0;
+    test->settings->current_rate_index = 0;
+    memset(test->settings->rate_values, 0, sizeof(test->settings->rate_values));
+    memset(test->settings->rate_times, 0, sizeof(test->settings->rate_times));
     test->zerocopy = 0;
     test->settings->skip_rx_copy = 0;
 
@@ -5001,6 +5175,17 @@ iperf_free_stream(struct iperf_stream *sp)
 	    sp->dscp_timer_data[i] = NULL;
 	}
     }
+    /* Cancel and free rate change timers */
+    for (i = 0; i < 3; i++) {
+	if (sp->rate_timers[i] != NULL) {
+	    tmr_cancel(sp->rate_timers[i]);
+	    sp->rate_timers[i] = NULL;
+	}
+	if (sp->rate_timer_data[i] != NULL) {
+	    free(sp->rate_timer_data[i]);
+	    sp->rate_timer_data[i] = NULL;
+	}
+    }
     /* Free socket buffer size data if allocated */
     if (sp->data != NULL) {
 	free(sp->data);
@@ -5871,4 +6056,5 @@ iperf_set_control_keepalive(struct iperf_test *test)
     return 0;
 }
 #endif //HAVE_TCP_KEEPALIVE
+
 

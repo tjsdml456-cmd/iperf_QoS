@@ -211,7 +211,9 @@ const char usage_longstr[] = "Usage: iperf3 [-s|-c host] [options]\n"
                            "                            Format: \"dscp1,time1,dscp2,time2,dscp3\"\n"
                            "                            Example: \"0,20,32,50,14\" means:\n"
                            "                            start with DSCP=0, change to DSCP=32 at 20s,\n"
-                           "                            change to DSCP=14 at 50s (TCP only).\n"
+                           "                            change to DSCP=14 at 50s (TCP/UDP).\n"
+                           "  --rate-change val         dynamically change bitrate during test (UDP/TCP).\n"
+                           "                            Format: \"rate1,time1,rate2,time2,rate3\" (e.g. 20M,20,1M,40,15M).\n"
 #if defined(HAVE_FLOWLABEL)
                            "  -L, --flowlabel N         set the IPv6 flow label (only supported on Linux)\n"
 #endif /* HAVE_FLOWLABEL */
@@ -579,4 +581,5 @@ const char warn_invalid_report[] =
 #ifdef __cplusplus
 } /* end extern "C" */
 #endif
+
 

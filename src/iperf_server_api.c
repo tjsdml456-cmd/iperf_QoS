@@ -896,6 +896,10 @@ iperf_run_server(struct iperf_test *test)
 			    cleanup_server(test);
 			    return -1;
 			}
+			if (iperf_create_rate_timers(test) < 0) {
+			    cleanup_server(test);
+			    return -1;
+			}
 		    }
 		    if (iperf_set_send_state(test, TEST_RUNNING) != 0) {
 			cleanup_server(test);
@@ -958,4 +962,5 @@ iperf_run_server(struct iperf_test *test)
 
     return 0;
 }
+
 

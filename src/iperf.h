@@ -172,10 +172,15 @@ struct iperf_settings
     int       tos;                  /* type of service bit */
     int       flowlabel;            /* IPv6 flow label */
     /* Dynamic DSCP change support */
-    int       dscp_count;           /* number of DSCP values to use */
-    int       dscp_values[4];      /* array of DSCP values (max 4: initial + 2 changes) */
+    int       dscp_count;           /* number of DSCP values to use (2-4; same for all streams) */
+    int       dscp_values[4];      /* array of DSCP values (max 4: initial + 3 changes) */
     double    dscp_times[3];       /* time intervals to change DSCP (seconds) */
     int       current_dscp_index;   /* current index in dscp_values array */
+    /* Dynamic rate change support (UDP/TCP application pacing) */
+    int       rate_count;           /* number of rate values to use (2-4) */
+    iperf_size_t rate_values[4];   /* array of bitrates (e.g. 20M, 1M, 15M) */
+    double    rate_times[3];        /* time intervals to change rate (seconds) */
+    int       current_rate_index;   /* current index in rate_values array */
     iperf_size_t bytes;             /* number of bytes to send */
     iperf_size_t blocks;            /* number of blocks (packets) to send */
     char      unit_format;          /* -f */
@@ -223,6 +228,8 @@ struct iperf_stream
     Timer     *send_timer;
     Timer     *dscp_timers[3];		/* DSCP change timers (max 3 changes) */
     void      *dscp_timer_data[3];	/* DSCP timer data pointers for cleanup */
+    Timer     *rate_timers[3];		/* Rate change timers (max 3 changes) */
+    void      *rate_timer_data[3];	/* Rate timer data pointers for cleanup */
     int       green_light;
     int       buffer_fd;	/* data to send, file descriptor */
     char      *buffer;		/* data to send, mmapped */
@@ -494,4 +501,5 @@ extern int gerror; /* error value from getaddrinfo(3), for use in internal error
 #define MAX_REVERSE_OUT_OF_ORDER_PACKETS 2
 
 #endif /* !__IPERF_H */
+
 
