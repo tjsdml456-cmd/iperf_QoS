@@ -226,10 +226,11 @@ struct iperf_stream
     /* non configurable members */
     struct iperf_stream_result *result;	/* structure pointer to result */
     Timer     *send_timer;
-    Timer     *dscp_timers[3];		/* DSCP change timers (max 3 changes) */
-    void      *dscp_timer_data[3];	/* DSCP timer data pointers for cleanup */
-    Timer     *rate_timers[3];		/* Rate change timers (max 3 changes) */
-    void      *rate_timer_data[3];	/* Rate timer data pointers for cleanup */
+#define IPERF_MAX_DSCP_RATE_TIMERS 4
+    Timer     *dscp_timers[IPERF_MAX_DSCP_RATE_TIMERS];   /* DSCP change timers */
+    void      *dscp_timer_data[IPERF_MAX_DSCP_RATE_TIMERS];
+    Timer     *rate_timers[IPERF_MAX_DSCP_RATE_TIMERS];   /* Rate change timers */
+    void      *rate_timer_data[IPERF_MAX_DSCP_RATE_TIMERS];
     int       green_light;
     int       buffer_fd;	/* data to send, file descriptor */
     char      *buffer;		/* data to send, mmapped */

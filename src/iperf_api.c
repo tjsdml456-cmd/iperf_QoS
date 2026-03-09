@@ -2389,9 +2389,9 @@ dscp_change_timer_proc(TimerClientData client_data, struct iperf_time *nowP)
     int dscp_index = data->dscp_index;
     int i;
     
-    if (test->done || test->state != TEST_RUNNING) {
+	if (test->done || test->state != TEST_RUNNING) {
 	/* Clear timer data pointer in stream */
-	for (i = 0; i < 3; i++) {
+	for (i = 0; i < IPERF_MAX_DSCP_RATE_TIMERS; i++) {
 	    if (sp->dscp_timer_data[i] == data) {
 		sp->dscp_timer_data[i] = NULL;
 		break;
@@ -2406,96 +2406,112 @@ dscp_change_timer_proc(TimerClientData client_data, struct iperf_time *nowP)
 	int domain = getsockdomain(sp->socket);
 	struct iperf_time now, diff;
 	double elapsed;
-	
-	/* Before changing DSCP, try to minimize buffered data for ALL streams */
-	/* Enable TCP_NODELAY and reduce socket buffer size to minimize buffering delay */
-	int opt = 1;
-	int min_sndbuf = 1024;  /* Minimum socket buffer size (1KB) - smaller for faster flush */
 	struct iperf_stream *all_sp;
-	
-	/* Apply socket buffer reduction to ALL streams (UE1, UE2, UE3) */
-	SLIST_FOREACH(all_sp, &test->streams, streams) {
-	    int saved_nodelay = 0;
-	    int saved_sndbuf = 0;
-	    socklen_t optlen = sizeof(saved_nodelay);
-	    
-	    /* Get and enable TCP_NODELAY to minimize buffering */
-	    if (getsockopt(all_sp->socket, IPPROTO_TCP, TCP_NODELAY, &saved_nodelay, &optlen) == 0) {
-		if (!saved_nodelay) {
-		    setsockopt(all_sp->socket, IPPROTO_TCP, TCP_NODELAY, &opt, sizeof(opt));
+	int sndbuf_before = -1;
+	int sndbuf_reduced = -1;
+	const char *no_flush_env = getenv("IPERF3_DSCP_NO_BUFFER_FLUSH");
+	int skip_buffer_flush = (no_flush_env && (no_flush_env[0] == '1' || no_flush_env[0] == 'y' || no_flush_env[0] == 'Y'));
+
+	if (!skip_buffer_flush) {
+	    /* Minimize buffered data: reduce SO_SNDBUF so old-DSCP data flushes quickly */
+	    int opt = 1;
+	    int min_sndbuf = 1024;
+	    SLIST_FOREACH(all_sp, &test->streams, streams) {
+		int saved_nodelay = 0;
+		int saved_sndbuf = 0;
+		socklen_t optlen = sizeof(saved_nodelay);
+		if (getsockopt(all_sp->socket, IPPROTO_TCP, TCP_NODELAY, &saved_nodelay, &optlen) == 0) {
+		    if (!saved_nodelay)
+			setsockopt(all_sp->socket, IPPROTO_TCP, TCP_NODELAY, &opt, sizeof(opt));
+		}
+		optlen = sizeof(saved_sndbuf);
+		if (getsockopt(all_sp->socket, SOL_SOCKET, SO_SNDBUF, &saved_sndbuf, &optlen) == 0) {
+		    if (all_sp == SLIST_FIRST(&test->streams))
+			sndbuf_before = saved_sndbuf;
+		    if (saved_sndbuf > min_sndbuf) {
+			setsockopt(all_sp->socket, SOL_SOCKET, SO_SNDBUF, &min_sndbuf, sizeof(min_sndbuf));
+			if (all_sp->data == NULL) {
+			    int *buf_data = (int *)malloc(sizeof(int));
+			    if (buf_data) {
+				*buf_data = saved_sndbuf;
+				all_sp->data = buf_data;
+			    }
+			} else {
+			    *(int *)all_sp->data = saved_sndbuf;
+			}
+			if (test->debug)
+			    printf("Reduced SO_SNDBUF from %d to %d for stream %d\n",
+				   saved_sndbuf, min_sndbuf, all_sp->socket);
+		    }
 		}
 	    }
-	    
-	    /* Reduce socket send buffer size to minimize buffered data */
-	    optlen = sizeof(saved_sndbuf);
-	    if (getsockopt(all_sp->socket, SOL_SOCKET, SO_SNDBUF, &saved_sndbuf, &optlen) == 0) {
-		if (saved_sndbuf > min_sndbuf) {
-		    /* Temporarily reduce send buffer to minimize buffering */
-		    setsockopt(all_sp->socket, SOL_SOCKET, SO_SNDBUF, &min_sndbuf, sizeof(min_sndbuf));
-		    /* Store original buffer size in stream data for later restoration */
-		    if (all_sp->data == NULL) {
-			/* Allocate memory to store original buffer size */
-			int *buf_data = (int *)malloc(sizeof(int));
-			if (buf_data) {
-			    *buf_data = saved_sndbuf;
-			    all_sp->data = buf_data;
-			}
-		    } else {
-			*(int *)all_sp->data = saved_sndbuf;
-		    }
-		    if (test->debug) {
-			printf("Reduced SO_SNDBUF from %d to %d for stream %d\n", 
-			       saved_sndbuf, min_sndbuf, all_sp->socket);
-		    }
-		}
+	    if (sndbuf_before >= 0) {
+		int actual = 0;
+		socklen_t optlen = sizeof(actual);
+		if (getsockopt(sp->socket, SOL_SOCKET, SO_SNDBUF, &actual, &optlen) == 0)
+		    sndbuf_reduced = actual;
 	    }
 	}
-	
-	/* Now change the DSCP value for this specific stream */
+
 	if (change_socket_dscp(sp->socket, new_tos, domain) == 0) {
 	    settings->current_dscp_index = dscp_index;
 	    settings->tos = new_tos;
-	    
-	    /* Force immediate transmission by sending a zero-length packet */
-	    /* This helps ensure new DSCP is applied to subsequent packets */
-	    char dummy = 0;
-	    send(sp->socket, &dummy, 0, MSG_DONTWAIT | MSG_NOSIGNAL);
-	    
-	    /* Restore original socket buffer size for ALL streams after a delay */
-	    /* Wait longer to allow buffered data with old DSCP to be sent first */
-	    /* Increased delay to reduce gap between iperf3 change and scheduler detection */
-	    /* Use longer delay to ensure small buffer (1KB) is fully flushed before restoring */
-	    usleep(500000);  /* 500ms delay - ensures buffered data with old DSCP is fully transmitted */
-	    SLIST_FOREACH(all_sp, &test->streams, streams) {
-		if (all_sp->data != NULL) {
-		    int saved_buf = *(int *)all_sp->data;
-		    if (saved_buf > min_sndbuf) {
-			setsockopt(all_sp->socket, SOL_SOCKET, SO_SNDBUF, &saved_buf, sizeof(saved_buf));
-			if (test->debug) {
-			    printf("Restored SO_SNDBUF to %d for stream %d\n", 
-				   saved_buf, all_sp->socket);
+	    {
+		char dummy = 0;
+		send(sp->socket, &dummy, 0, MSG_DONTWAIT | MSG_NOSIGNAL);
+	    }
+
+	    if (!skip_buffer_flush) {
+		usleep(500000);
+		SLIST_FOREACH(all_sp, &test->streams, streams) {
+		    if (all_sp->data != NULL) {
+			int saved_buf = *(int *)all_sp->data;
+			int min_sndbuf = 1024;
+			if (saved_buf > min_sndbuf) {
+			    setsockopt(all_sp->socket, SOL_SOCKET, SO_SNDBUF, &saved_buf, sizeof(saved_buf));
+			    if (test->debug)
+				printf("Restored SO_SNDBUF to %d for stream %d\n", saved_buf, all_sp->socket);
 			}
 			free(all_sp->data);
 			all_sp->data = NULL;
 		    }
 		}
 	    }
-	    
-	    if (test->debug) {
-		iperf_time_now(&now);
-		iperf_time_diff(&now, &sp->result->start_time_fixed, &diff);
-		elapsed = iperf_time_in_secs(&diff);
-		printf("Changed DSCP to %d (0x%02x) at %.6f seconds\n",
-		       new_tos, new_tos, elapsed);
+
+	    {
+		int sndbuf_restored = -1;
+		socklen_t optlen = sizeof(sndbuf_restored);
+		if (getsockopt(sp->socket, SOL_SOCKET, SO_SNDBUF, &sndbuf_restored, &optlen) == 0) {
+		    iperf_time_now(&now);
+		    iperf_time_diff(&now, &sp->result->start_time_fixed, &diff);
+		    elapsed = iperf_time_in_secs(&diff);
+		    if (skip_buffer_flush)
+			printf("Changed DSCP to %d (0x%02x) at %.6f seconds (no buffer flush)\n",
+			       new_tos, new_tos, elapsed);
+		    else
+			printf("Changed DSCP to %d (0x%02x) at %.6f seconds | SO_SNDBUF: before=%d reduced=%d restored=%d\n",
+			       new_tos, new_tos, elapsed,
+			   sndbuf_before >= 0 ? sndbuf_before : -1,
+			   sndbuf_reduced >= 0 ? sndbuf_reduced : -1,
+			   sndbuf_restored);
+		    fflush(stdout);
+		} else if (test->debug) {
+		    iperf_time_now(&now);
+		    iperf_time_diff(&now, &sp->result->start_time_fixed, &diff);
+		    elapsed = iperf_time_in_secs(&diff);
+		    printf("Changed DSCP to %d (0x%02x) at %.6f seconds\n", new_tos, new_tos, elapsed);
+		    fflush(stdout);
+		}
 	    }
 	} else if (test->debug) {
 	    printf("Warning: Failed to change DSCP to %d\n", new_tos);
-	    /* Restore settings for all streams if DSCP change failed */
-	    SLIST_FOREACH(all_sp, &test->streams, streams) {
-		if (all_sp->data != NULL) {
-		    int saved_buf = *(int *)all_sp->data;
-		    if (saved_buf > min_sndbuf) {
-			setsockopt(all_sp->socket, SOL_SOCKET, SO_SNDBUF, &saved_buf, sizeof(saved_buf));
+	    if (!skip_buffer_flush) {
+		int min_sndbuf = 1024;
+		SLIST_FOREACH(all_sp, &test->streams, streams) {
+		    if (all_sp->data != NULL) {
+			int saved_buf = *(int *)all_sp->data;
+			if (saved_buf > min_sndbuf)
+			    setsockopt(all_sp->socket, SOL_SOCKET, SO_SNDBUF, &saved_buf, sizeof(saved_buf));
 			free(all_sp->data);
 			all_sp->data = NULL;
 		    }
@@ -2505,7 +2521,7 @@ dscp_change_timer_proc(TimerClientData client_data, struct iperf_time *nowP)
     }
     
     /* Clear timer data pointer in stream and free */
-    for (i = 0; i < 3; i++) {
+    for (i = 0; i < IPERF_MAX_DSCP_RATE_TIMERS; i++) {
 	if (sp->dscp_timer_data[i] == data) {
 	    sp->dscp_timer_data[i] = NULL;
 	    break;
@@ -2532,7 +2548,7 @@ rate_change_timer_proc(TimerClientData client_data, struct iperf_time *nowP)
     int i;
 
     if (test->done || test->state != TEST_RUNNING) {
-	for (i = 0; i < 3; i++) {
+	for (i = 0; i < IPERF_MAX_DSCP_RATE_TIMERS; i++) {
 	    if (sp->rate_timer_data[i] == data) {
 		sp->rate_timer_data[i] = NULL;
 		break;
@@ -2558,7 +2574,7 @@ rate_change_timer_proc(TimerClientData client_data, struct iperf_time *nowP)
 	}
     }
 
-    for (i = 0; i < 3; i++) {
+    for (i = 0; i < IPERF_MAX_DSCP_RATE_TIMERS; i++) {
 	if (sp->rate_timer_data[i] == data) {
 	    sp->rate_timer_data[i] = NULL;
 	    break;
@@ -2599,7 +2615,7 @@ iperf_create_dscp_timers(struct iperf_test * test)
 	settings = sp->settings;
 	
 	/* Initialize DSCP timers array */
-	for (i = 0; i < 3; i++) {
+	for (i = 0; i < IPERF_MAX_DSCP_RATE_TIMERS; i++) {
 	    sp->dscp_timers[i] = NULL;
 	    sp->dscp_timer_data[i] = NULL;
 	}
@@ -2674,7 +2690,7 @@ iperf_create_rate_timers(struct iperf_test * test)
     SLIST_FOREACH(sp, &test->streams, streams) {
 	settings = sp->settings;
 
-	for (i = 0; i < 3; i++) {
+	for (i = 0; i < IPERF_MAX_DSCP_RATE_TIMERS; i++) {
 	    sp->rate_timers[i] = NULL;
 	    sp->rate_timer_data[i] = NULL;
 	}
@@ -5165,7 +5181,7 @@ iperf_free_stream(struct iperf_stream *sp)
     if (sp->send_timer != NULL)
 	tmr_cancel(sp->send_timer);
     /* Cancel and free DSCP timers */
-    for (i = 0; i < 3; i++) {
+    for (i = 0; i < IPERF_MAX_DSCP_RATE_TIMERS; i++) {
 	if (sp->dscp_timers[i] != NULL) {
 	    tmr_cancel(sp->dscp_timers[i]);
 	    sp->dscp_timers[i] = NULL;
@@ -5176,7 +5192,7 @@ iperf_free_stream(struct iperf_stream *sp)
 	}
     }
     /* Cancel and free rate change timers */
-    for (i = 0; i < 3; i++) {
+    for (i = 0; i < IPERF_MAX_DSCP_RATE_TIMERS; i++) {
 	if (sp->rate_timers[i] != NULL) {
 	    tmr_cancel(sp->rate_timers[i]);
 	    sp->rate_timers[i] = NULL;
