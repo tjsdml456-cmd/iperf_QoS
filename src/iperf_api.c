@@ -1531,7 +1531,7 @@ iperf_parse_arguments(struct iperf_test *test, int argc, char **argv)
 		    }
 		    
 		    token = strtok_r(str, ",", &saveptr);
-		    while (token != NULL && count < 5) {
+		    while (token != NULL && count < 7) {
 			if (count % 2 == 0) {
 			    /* DSCP value */
 			    if (count / 2 >= 4) {
@@ -1560,8 +1560,8 @@ iperf_parse_arguments(struct iperf_test *test, int argc, char **argv)
 			token = strtok_r(NULL, ",", &saveptr);
 		    }
 		    
-		    /* Calculate number of DSCP values */
-		    test->settings->dscp_count = (count + 1) / 2;
+		    /* Number of DSCP values: 7 tokens => 4 values (count=6), 5 => 3, 3 => 2. Use (count+2)/2. */
+		    test->settings->dscp_count = (count + 2) / 2;
 		    if (test->settings->dscp_count < 2 || test->settings->dscp_count > 4) {
 			free(str);
 			i_errno = IEBADTOS;
@@ -1571,7 +1571,17 @@ iperf_parse_arguments(struct iperf_test *test, int argc, char **argv)
 		    /* Set initial TOS to first DSCP value */
 		    test->settings->tos = test->settings->dscp_values[0];
 		    test->settings->current_dscp_index = 0;
-		    
+		    /* Debug: set IPERF3_DSCP_DEBUG=1 to see parse/timer/fire logs */
+		    {
+			const char *d = getenv("IPERF3_DSCP_DEBUG");
+			if (d && (d[0] == '1' || d[0] == 'y' || d[0] == 'Y')) {
+			    fprintf(stderr, "[DSCP_PARSE] count=%d dscp_count=%d values=[%d,%d,%d,%d] times=[%.1f,%.1f,%.1f]\n",
+				    count, test->settings->dscp_count,
+				    test->settings->dscp_values[0], test->settings->dscp_values[1],
+				    test->settings->dscp_values[2], test->settings->dscp_values[3],
+				    test->settings->dscp_times[0], test->settings->dscp_times[1], test->settings->dscp_times[2]);
+			}
+		    }
 		    free(str);
 		    client_flag = 1;
 		}
@@ -1617,7 +1627,8 @@ iperf_parse_arguments(struct iperf_test *test, int argc, char **argv)
 			rcount++;
 			rtok = strtok_r(NULL, ",", &rsaveptr);
 		    }
-		    test->settings->rate_count = (rcount + 1) / 2;
+		    /* Number of rate values: 7 tokens => 4 values (rcount=6), 5 => 3, 3 => 2. Use (rcount+2)/2. */
+		    test->settings->rate_count = (rcount + 2) / 2;
 		    if (test->settings->rate_count < 2 || test->settings->rate_count > 4) {
 			free(rstr);
 			i_errno = IEBADTOS;
@@ -2158,9 +2169,12 @@ iperf_check_throttle(struct iperf_stream *sp, struct iperf_time *nowP)
 
     if (sp->test->done || sp->test->settings->rate == 0)
         return;
-    iperf_time_diff(&sp->result->start_time_fixed, nowP, &temp_time);
+    /* Use throttle baseline (reset on rate change) so high->low rate change doesn't sleep for ages */
+    iperf_time_diff(&sp->result->throttle_baseline_time, nowP, &temp_time);    
     seconds = iperf_time_in_secs(&temp_time);
-    bits_sent = sp->result->bytes_sent * 8;
+    bits_sent = (sp->result->bytes_sent - sp->result->throttle_baseline_bytes) * 8;
+    if (seconds <= 0)
+	seconds = 0.0001; /* avoid div by zero */    
     bits_per_second = bits_sent / seconds;
     missing_rate = sp->test->settings->rate - bits_per_second;
 
@@ -2264,6 +2278,32 @@ iperf_send_mt(struct iperf_stream *sp)
     int throttle_check;
 #endif /* HAVE_CLOCK_NANOSLEEP, HAVE_NANOSLEEP */
 
+    /* Log current socket TOS when sending (DSCP verify: traffic really goes out with this TOS) */
+    {
+	const char *d = getenv("IPERF3_DSCP_DEBUG");
+	if (d && (d[0] == '1' || d[0] == 'y' || d[0] == 'Y') && test->settings->dscp_count > 1 &&
+	    iperf_time_now(&now) == 0) {
+	    static struct iperf_time last_dscp_send_log_time;
+	    static int last_dscp_send_log_initialized = 0;
+	    if (!last_dscp_send_log_initialized) {
+		last_dscp_send_log_time = now;
+		last_dscp_send_log_initialized = 1;
+	    } else {
+		struct iperf_time diff;
+		iperf_time_diff(&now, &last_dscp_send_log_time, &diff);
+		if (iperf_time_in_secs(&diff) >= 1.0) {
+		    struct iperf_time diff_start;
+		    iperf_time_diff(&now, &sp->result->start_time_fixed, &diff_start);
+		    double elapsed = iperf_time_in_secs(&diff_start);
+		    int tos = get_socket_tos(sp->socket, getsockdomain(sp->socket));
+		    fprintf(stderr, "[DSCP_SEND] elapsed=%.1fs socket_tos=%d (DSCP=%d) -> traffic uses this TOS\n",
+			    elapsed, tos, tos >= 0 ? tos >> 2 : -1);
+		    last_dscp_send_log_time = now;
+		}
+	    }
+	}
+    }
+
     /* Can we do multisend mode? */
     if (test->settings->burst != 0)
         multisend = test->settings->burst;
@@ -2363,6 +2403,8 @@ iperf_init_test(struct iperf_test *test)
     }
     SLIST_FOREACH(sp, &test->streams, streams) {
 	sp->result->start_time = sp->result->start_time_fixed = now;
+	sp->result->throttle_baseline_time = now;
+	sp->result->throttle_baseline_bytes = sp->result->bytes_sent;    
     }
 
     if (test->on_test_start)
@@ -2401,6 +2443,14 @@ dscp_change_timer_proc(TimerClientData client_data, struct iperf_time *nowP)
 	return;
     }
     
+    {
+	const char *d = getenv("IPERF3_DSCP_DEBUG");
+	if (d != NULL && d[0] == '1')
+	    fprintf(stderr, "[DSCP_FIRE] dscp_index=%d dscp_count=%d -> %s (new_tos=%d)\n",
+		    dscp_index, settings->dscp_count,
+		    dscp_index < settings->dscp_count ? "APPLY" : "SKIP",
+		    dscp_index < settings->dscp_count ? settings->dscp_values[dscp_index] : -1);
+    }
     if (dscp_index < settings->dscp_count) {
 	int new_tos = settings->dscp_values[dscp_index];
 	int domain = getsockdomain(sp->socket);
@@ -2411,6 +2461,9 @@ dscp_change_timer_proc(TimerClientData client_data, struct iperf_time *nowP)
 	int sndbuf_reduced = -1;
 	const char *no_flush_env = getenv("IPERF3_DSCP_NO_BUFFER_FLUSH");
 	int skip_buffer_flush = (no_flush_env && (no_flush_env[0] == '1' || no_flush_env[0] == 'y' || no_flush_env[0] == 'Y'));
+	/* UDP: skip buffer shrink + 0.5s sleep so send thread is not blocked and throughput does not die */
+	if (test->protocol->id == Pudp)
+	    skip_buffer_flush = 1;
 
 	if (!skip_buffer_flush) {
 	    /* Minimize buffered data: reduce SO_SNDBUF so old-DSCP data flushes quickly */
@@ -2456,6 +2509,14 @@ dscp_change_timer_proc(TimerClientData client_data, struct iperf_time *nowP)
 	if (change_socket_dscp(sp->socket, new_tos, domain) == 0) {
 	    settings->current_dscp_index = dscp_index;
 	    settings->tos = new_tos;
+	    {
+		const char *dv = getenv("IPERF3_DSCP_DEBUG");
+		if (dv != NULL && (dv[0] == '1' || dv[0] == 'y' || dv[0] == 'Y')) {
+		    int actual_tos = get_socket_tos(sp->socket, domain);
+		    fprintf(stderr, "[DSCP_VERIFY] set requested_tos=%d (DSCP=%d) -> socket_tos=%d (DSCP=%d)\n",
+			    new_tos, new_tos >> 2, actual_tos >= 0 ? actual_tos : -1, actual_tos >= 0 ? actual_tos >> 2 : -1);
+		}	    
+	    }
 	    {
 		char dummy = 0;
 		send(sp->socket, &dummy, 0, MSG_DONTWAIT | MSG_NOSIGNAL);
@@ -2565,9 +2626,13 @@ rate_change_timer_proc(TimerClientData client_data, struct iperf_time *nowP)
 
 	settings->rate = new_rate;
 	settings->current_rate_index = rate_index;
-
+	
+	/* Reset throttle baseline so pacing uses new rate from "now" instead of cumulative since test start */
+	iperf_time_now(&now);
+	sp->result->throttle_baseline_time = now;
+	sp->result->throttle_baseline_bytes = sp->result->bytes_sent;
+	
 	if (test->debug) {
-	    iperf_time_now(&now);
 	    iperf_time_diff(&now, &sp->result->start_time_fixed, &diff);
 	    elapsed = iperf_time_in_secs(&diff);
 	    printf("Changed rate to %" PRIu64 " bps at %.6f seconds\n", (uint64_t)new_rate, elapsed);
@@ -2623,7 +2688,7 @@ iperf_create_dscp_timers(struct iperf_test * test)
 	/* Create timers for each DSCP change */
 	if (settings->dscp_count > 1) {
 	    struct iperf_time target_time, diff;
-	    
+	    const char *d;
 	    for (i = 0; i < settings->dscp_count - 1; i++) {
 		/* Allocate memory for timer data */
 		timer_data = (struct dscp_timer_data *)malloc(sizeof(struct dscp_timer_data));
@@ -2646,10 +2711,15 @@ iperf_create_dscp_timers(struct iperf_test * test)
 		
 		/* If target time is in the past, skip this timer */
 		if (delay_usecs < 0) {
+		    if ((d = getenv("IPERF3_DSCP_DEBUG")) != NULL && d[0] == '1')
+			fprintf(stderr, "[DSCP_TIMER] i=%d time=%.1fs delay_usecs=%ld SKIP (past)\n",
+				i, settings->dscp_times[i], (long)delay_usecs);
 		    free(timer_data);
 		    continue;
 		}
-		
+		if ((d = getenv("IPERF3_DSCP_DEBUG")) != NULL && d[0] == '1')
+		    fprintf(stderr, "[DSCP_TIMER] i=%d time=%.1fs delay_usecs=%ld -> will set dscp_values[%d]=%d\n",
+			    i, settings->dscp_times[i], (long)delay_usecs, i + 1, settings->dscp_values[i + 1]);
 		/* Store timer data pointer for cleanup */
 		sp->dscp_timer_data[i] = timer_data;
 		
@@ -6073,4 +6143,4 @@ iperf_set_control_keepalive(struct iperf_test *test)
 }
 #endif //HAVE_TCP_KEEPALIVE
 
-
+    

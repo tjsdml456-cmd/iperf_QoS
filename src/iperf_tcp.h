@@ -65,6 +65,11 @@ int iperf_tcp_connect(struct iperf_test *);
  */
 int change_socket_dscp(int s, int tos_value, int domain);
 
+/**
+ * get_socket_tos -- read current TOS/DSCP from socket (IP_TOS or IPV6_TCLASS)
+ * returns TOS value (0-255) or -1 on error
+ */
+int get_socket_tos(int s, int domain);
 
 #endif
 

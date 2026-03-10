@@ -72,6 +72,26 @@ change_socket_dscp(int s, int tos_value, int domain)
     return 0;
 }
 
+/* Read current TOS from socket (for verification / debug) */
+int
+get_socket_tos(int s, int domain)
+{
+    int tos = -1;
+    socklen_t len = sizeof(tos);
+    if (domain == AF_INET6) {
+#ifdef IPV6_TCLASS
+	if (getsockopt(s, IPPROTO_IPV6, IPV6_TCLASS, &tos, &len) < 0)
+	    return -1;
+#else
+	return -1;
+#endif
+    } else {
+	if (getsockopt(s, IPPROTO_IP, IP_TOS, &tos, &len) < 0)
+	    return -1;
+    }
+    return tos;
+}
+
 /* iperf_tcp_recv
  *
  * receives the data for TCP

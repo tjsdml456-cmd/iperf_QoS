@@ -148,6 +148,9 @@ struct iperf_stream_result
     struct iperf_time start_time;
     struct iperf_time end_time;
     struct iperf_time start_time_fixed;
+    /* Throttle baseline: when rate changes, we reset to (now, bytes_sent) so pacing uses new rate from "now" */
+    struct iperf_time throttle_baseline_time;
+    iperf_size_t     throttle_baseline_bytes;    
     double sender_time;
     double receiver_time;
     TAILQ_HEAD(irlisthead, iperf_interval_results) interval_results;
