@@ -150,12 +150,20 @@ struct iperf_stream_result
     struct iperf_time start_time_fixed;
     /* Throttle baseline: when rate changes, we reset to (now, bytes_sent) so pacing uses new rate from "now" */
     struct iperf_time throttle_baseline_time;
-    iperf_size_t     throttle_baseline_bytes;    
+    iperf_size_t     throttle_baseline_bytes;
     double sender_time;
     double receiver_time;
     TAILQ_HEAD(irlisthead, iperf_interval_results) interval_results;
     void     *data;
 };
+
+/*
+ * --dscp-change / --rate-change: up to 12 transitions (13 values) per test.
+ * Token list is dscp1,t1,dscp2,t2,...,dscp13 (2*13-1 = 25 comma-separated fields max).
+ */
+#define IPERF_MAX_DSCP_TRANSITIONS    12
+#define IPERF_MAX_DSCP_SEQUENCE       (IPERF_MAX_DSCP_TRANSITIONS + 1)
+#define IPERF_MAX_DSCP_CHANGE_TOKENS  (2 * IPERF_MAX_DSCP_SEQUENCE - 1)
 
 #define COOKIE_SIZE 37		/* size of an ascii uuid */
 struct iperf_settings
@@ -175,14 +183,14 @@ struct iperf_settings
     int       tos;                  /* type of service bit */
     int       flowlabel;            /* IPv6 flow label */
     /* Dynamic DSCP change support */
-    int       dscp_count;           /* number of DSCP values to use (2-4; same for all streams) */
-    int       dscp_values[4];      /* array of DSCP values (max 4: initial + 3 changes) */
-    double    dscp_times[3];       /* time intervals to change DSCP (seconds) */
+    int       dscp_count;           /* number of DSCP values (2 .. IPERF_MAX_DSCP_SEQUENCE) */
+    int       dscp_values[IPERF_MAX_DSCP_SEQUENCE];
+    double    dscp_times[IPERF_MAX_DSCP_TRANSITIONS];
     int       current_dscp_index;   /* current index in dscp_values array */
     /* Dynamic rate change support (UDP/TCP application pacing) */
-    int       rate_count;           /* number of rate values to use (2-4) */
-    iperf_size_t rate_values[4];   /* array of bitrates (e.g. 20M, 1M, 15M) */
-    double    rate_times[3];        /* time intervals to change rate (seconds) */
+    int       rate_count;           /* number of rate values (2 .. IPERF_MAX_DSCP_SEQUENCE) */
+    iperf_size_t rate_values[IPERF_MAX_DSCP_SEQUENCE];
+    double    rate_times[IPERF_MAX_DSCP_TRANSITIONS];
     int       current_rate_index;   /* current index in rate_values array */
     iperf_size_t bytes;             /* number of bytes to send */
     iperf_size_t blocks;            /* number of blocks (packets) to send */
@@ -229,7 +237,7 @@ struct iperf_stream
     /* non configurable members */
     struct iperf_stream_result *result;	/* structure pointer to result */
     Timer     *send_timer;
-#define IPERF_MAX_DSCP_RATE_TIMERS 4
+#define IPERF_MAX_DSCP_RATE_TIMERS IPERF_MAX_DSCP_TRANSITIONS
     Timer     *dscp_timers[IPERF_MAX_DSCP_RATE_TIMERS];   /* DSCP change timers */
     void      *dscp_timer_data[IPERF_MAX_DSCP_RATE_TIMERS];
     Timer     *rate_timers[IPERF_MAX_DSCP_RATE_TIMERS];   /* Rate change timers */
@@ -505,5 +513,6 @@ extern int gerror; /* error value from getaddrinfo(3), for use in internal error
 #define MAX_REVERSE_OUT_OF_ORDER_PACKETS 2
 
 #endif /* !__IPERF_H */
+
 
 

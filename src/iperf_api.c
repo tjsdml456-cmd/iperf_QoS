@@ -1517,24 +1517,25 @@ iperf_parse_arguments(struct iperf_test *test, int argc, char **argv)
                 break;
 	    case OPT_DSCP_CHANGE:
 		{
-		    /* Parse format: "dscp1,time1,dscp2,time2,dscp3" (2-4 DSCP values, 1-3 change times) */
-		    /* dscp_count is stored in test->settings (shared by all streams); each stream gets (dscp_count-1) timers */
+		    /* Parse: "dscp1,t1,dscp2,t2,...,dscpN" — N in [2, IPERF_MAX_DSCP_SEQUENCE], up to 12 transitions */
+		    
 		    char *str = strdup(optarg);
 		    char *token, *saveptr;
 		    int count = 0;
 		    int dscp_val;
 		    double time_val;
-		    
+		    int pi;
+
+
 		    if (!str) {
 			i_errno = IEBADTOS;
 			return -1;
 		    }
 		    
 		    token = strtok_r(str, ",", &saveptr);
-		    while (token != NULL && count < 7) {
+		    while (token != NULL && count < IPERF_MAX_DSCP_CHANGE_TOKENS) {
 			if (count % 2 == 0) {
-			    /* DSCP value */
-			    if (count / 2 >= 4) {
+			    if (count / 2 >= IPERF_MAX_DSCP_SEQUENCE) {
 				free(str);
 				i_errno = IEBADTOS;
 				return -1;
@@ -1547,7 +1548,6 @@ iperf_parse_arguments(struct iperf_test *test, int argc, char **argv)
 			    }
 			    test->settings->dscp_values[count / 2] = dscp_val;
 			} else {
-			    /* Time value */
 			    time_val = strtod(token, &endptr);
 			    if (endptr == token || time_val < 0) {
 				free(str);
@@ -1560,26 +1560,38 @@ iperf_parse_arguments(struct iperf_test *test, int argc, char **argv)
 			token = strtok_r(NULL, ",", &saveptr);
 		    }
 		    
-		    /* Number of DSCP values: 7 tokens => 4 values (count=6), 5 => 3, 3 => 2. Use (count+2)/2. */
+		    if (token != NULL) {
+			free(str);
+			i_errno = IEBADTOS;
+			return -1;
+		    }
+		    if (count < 3 || (count % 2) == 0) {
+			free(str);
+			i_errno = IEBADTOS;
+			return -1;
+		    }
+		   
 		    test->settings->dscp_count = (count + 2) / 2;
-		    if (test->settings->dscp_count < 2 || test->settings->dscp_count > 4) {
+		    if (test->settings->dscp_count < 2 ||
+			test->settings->dscp_count > IPERF_MAX_DSCP_SEQUENCE) {		    
 			free(str);
 			i_errno = IEBADTOS;
 			return -1;
 		    }
 		    
-		    /* Set initial TOS to first DSCP value */
 		    test->settings->tos = test->settings->dscp_values[0];
 		    test->settings->current_dscp_index = 0;
-		    /* Debug: set IPERF3_DSCP_DEBUG=1 to see parse/timer/fire logs */
 		    {
 			const char *d = getenv("IPERF3_DSCP_DEBUG");
 			if (d && (d[0] == '1' || d[0] == 'y' || d[0] == 'Y')) {
-			    fprintf(stderr, "[DSCP_PARSE] count=%d dscp_count=%d values=[%d,%d,%d,%d] times=[%.1f,%.1f,%.1f]\n",
-				    count, test->settings->dscp_count,
-				    test->settings->dscp_values[0], test->settings->dscp_values[1],
-				    test->settings->dscp_values[2], test->settings->dscp_values[3],
-				    test->settings->dscp_times[0], test->settings->dscp_times[1], test->settings->dscp_times[2]);
+			    fprintf(stderr, "[DSCP_PARSE] tokens=%d dscp_count=%d values=",
+				    count, test->settings->dscp_count);
+			    for (pi = 0; pi < test->settings->dscp_count; pi++)
+				fprintf(stderr, "%s%d", pi ? "," : "[", test->settings->dscp_values[pi]);
+			    fprintf(stderr, "] times=[");
+			    for (pi = 0; pi < test->settings->dscp_count - 1; pi++)
+				fprintf(stderr, "%s%.4f", pi ? "," : "", test->settings->dscp_times[pi]);
+			    fprintf(stderr, "]\n");			
 			}
 		    }
 		    free(str);
@@ -1588,8 +1600,7 @@ iperf_parse_arguments(struct iperf_test *test, int argc, char **argv)
 		break;
 	    case OPT_RATE_CHANGE:
 		{
-		    /* Parse format: "rate1,time1,rate2,time2,rate3" (e.g. "20M,20,1M,40,15M") */
-		    /* Same structure as --dscp-change: 2-4 rate values, 1-3 change times */
+		    /* Same token pattern as --dscp-change: rate1,t1,...,rateN */
 		    char *rstr = strdup(optarg);
 		    char *rtok, *rsaveptr;
 		    int rcount = 0;
@@ -1601,9 +1612,9 @@ iperf_parse_arguments(struct iperf_test *test, int argc, char **argv)
 			return -1;
 		    }
 		    rtok = strtok_r(rstr, ",", &rsaveptr);
-		    while (rtok != NULL && rcount < 7) {
+		    while (rtok != NULL && rcount < IPERF_MAX_DSCP_CHANGE_TOKENS) {
 			if (rcount % 2 == 0) {
-			    if (rcount / 2 >= 4) {
+			    if (rcount / 2 >= IPERF_MAX_DSCP_SEQUENCE) {
 				free(rstr);
 				i_errno = IEBADTOS;
 				return -1;
@@ -1627,9 +1638,20 @@ iperf_parse_arguments(struct iperf_test *test, int argc, char **argv)
 			rcount++;
 			rtok = strtok_r(NULL, ",", &rsaveptr);
 		    }
-		    /* Number of rate values: 7 tokens => 4 values (rcount=6), 5 => 3, 3 => 2. Use (rcount+2)/2. */
+		   
+		    if (rtok != NULL) {
+			free(rstr);
+			i_errno = IEBADTOS;
+			return -1;
+		    }
+		    if (rcount < 3 || (rcount % 2) == 0) {
+			free(rstr);
+			i_errno = IEBADTOS;
+			return -1;
+		    }		   
 		    test->settings->rate_count = (rcount + 2) / 2;
-		    if (test->settings->rate_count < 2 || test->settings->rate_count > 4) {
+		    if (test->settings->rate_count < 2 ||
+			test->settings->rate_count > IPERF_MAX_DSCP_SEQUENCE) {		    
 			free(rstr);
 			i_errno = IEBADTOS;
 			return -1;
