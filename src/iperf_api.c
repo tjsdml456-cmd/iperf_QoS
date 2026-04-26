@@ -1517,7 +1517,7 @@ iperf_parse_arguments(struct iperf_test *test, int argc, char **argv)
                 break;
 	    case OPT_DSCP_CHANGE:
 		{
-		    /* Parse: "dscp1,t1,dscp2,t2,...,dscpN" — N in [2, IPERF_MAX_DSCP_SEQUENCE], up to 12 transitions */
+		    /* Parse: "dscp1,t1,dscp2,t2,...,dscpN" — N in [2, IPERF_MAX_DSCP_SEQUENCE], up to 400 transitions */
 		    
 		    char *str = strdup(optarg);
 		    char *token, *saveptr;

@@ -158,10 +158,10 @@ struct iperf_stream_result
 };
 
 /*
- * --dscp-change / --rate-change: up to 12 transitions (13 values) per test.
- * Token list is dscp1,t1,dscp2,t2,...,dscp13 (2*13-1 = 25 comma-separated fields max).
+ * --dscp-change / --rate-change: up to 400 transitions (401 values) per test.
+ * Token list is dscp1,t1,dscp2,t2,...,dscp401 (2*401-1 = 801 comma-separated fields max).
  */
-#define IPERF_MAX_DSCP_TRANSITIONS    12
+#define IPERF_MAX_DSCP_TRANSITIONS    400
 #define IPERF_MAX_DSCP_SEQUENCE       (IPERF_MAX_DSCP_TRANSITIONS + 1)
 #define IPERF_MAX_DSCP_CHANGE_TOKENS  (2 * IPERF_MAX_DSCP_SEQUENCE - 1)
 
