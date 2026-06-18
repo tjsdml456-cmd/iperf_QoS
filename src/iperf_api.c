@@ -1658,6 +1658,20 @@ iperf_parse_arguments(struct iperf_test *test, int argc, char **argv)
 		    }
 		    test->settings->rate = test->settings->rate_values[0];
 		    test->settings->current_rate_index = 0;
+		    {
+			const char *d = getenv("IPERF3_DSCP_DEBUG");
+			if (d != NULL && d[0] == '1') {
+			    int pi;
+			    fprintf(stderr, "[RATE_PARSE] tokens=%d rate_count=%d values=",
+				    rcount, test->settings->rate_count);
+			    for (pi = 0; pi < test->settings->rate_count; pi++)
+				fprintf(stderr, " %" PRIu64, (uint64_t)test->settings->rate_values[pi]);
+			    fprintf(stderr, " times=");
+			    for (pi = 0; pi < test->settings->rate_count - 1; pi++)
+				fprintf(stderr, " %.6f", test->settings->rate_times[pi]);
+			    fprintf(stderr, "\n");
+			}
+		    }
 		    free(rstr);
 		    client_flag = 1;
 		}
@@ -2653,11 +2667,18 @@ rate_change_timer_proc(TimerClientData client_data, struct iperf_time *nowP)
 	iperf_time_now(&now);
 	sp->result->throttle_baseline_time = now;
 	sp->result->throttle_baseline_bytes = sp->result->bytes_sent;
-	
-	if (test->debug) {
+
+	{
+	    const char *dv = getenv("IPERF3_DSCP_DEBUG");
 	    iperf_time_diff(&now, &sp->result->start_time_fixed, &diff);
 	    elapsed = iperf_time_in_secs(&diff);
-	    printf("Changed rate to %" PRIu64 " bps at %.6f seconds\n", (uint64_t)new_rate, elapsed);
+	    if (test->debug) {
+		printf("Changed rate to %" PRIu64 " bps at %.6f seconds\n", (uint64_t)new_rate, elapsed);
+		fflush(stdout);
+	    }
+	    if (dv != NULL && (dv[0] == '1' || dv[0] == 'y' || dv[0] == 'Y')) {
+		fprintf(stderr, "Changed rate to %" PRIu64 " bps at %.6f seconds\n", (uint64_t)new_rate, elapsed);
+	    }
 	}
     }
 
@@ -2771,8 +2792,13 @@ iperf_create_rate_timers(struct iperf_test * test)
     struct rate_timer_data *timer_data;
     int i;
 
-    if (test->settings->rate_count < 2)
+    if (test->settings->rate_count < 2) {
+	const char *dv = getenv("IPERF3_DSCP_DEBUG");
+	if (dv != NULL && dv[0] == '1')
+	    fprintf(stderr, "[RATE_TIMER] skip: rate_count=%d (need --rate-change with >=1 transition)\n",
+		    test->settings->rate_count);
 	return 0;
+    }
 
     if (iperf_time_now(&now) < 0) {
 	i_errno = IEINITTEST;
@@ -2815,6 +2841,17 @@ iperf_create_rate_timers(struct iperf_test * test)
 		    sp->rate_timer_data[i] = NULL;
 		    i_errno = IEINITTEST;
 		    return -1;
+		}
+		{
+		    const char *dv = getenv("IPERF3_DSCP_DEBUG");
+		    if (dv != NULL && (dv[0] == '1' || dv[0] == 'y' || dv[0] == 'Y')) {
+			fprintf(stderr, "[RATE_TIMER] i=%d time=%.1fs delay_usecs=%ld -> rate_values[%d]=%" PRIu64 " bps\n",
+				i,
+				settings->rate_times[i],
+				(long)delay_usecs,
+				i + 1,
+				(uint64_t)settings->rate_values[i + 1]);
+		    }
 		}
 	    }
 	}
@@ -6166,3 +6203,4 @@ iperf_set_control_keepalive(struct iperf_test *test)
 #endif //HAVE_TCP_KEEPALIVE
 
     
+
